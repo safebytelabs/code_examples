@@ -1,0 +1,282 @@
+##
+## GITHUB ACTIONS PIPELINE 
+## Actions to be taken when pushing or PR to a branch
+##
+## Last update: 2024/02/06
+##
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - live
+  pull_request:
+    branches:
+      - live
+
+name: Push or PR to LIVE
+
+permissions:
+  pull-requests: write
+  id-token: write
+  contents: write
+  actions: write
+  checks: write
+
+jobs:
+
+###############################################################################
+##
+## Terraform/TFLint linting stage
+##
+###############################################################################
+
+  LintStage:
+    name: Linting code
+    runs-on: ["self-hosted", "m92p"]
+    environment: ci_cd_pipeline
+    steps:
+  
+    ########## G E N E R I C   B L O C K ######################################
+  
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@633666f66e0061ca3b725c73b2ec20cd13a8fdd1 # v2.0.3
+      with:
+        terraform_version: "${{ vars.CI_TF_VERSION }}"
+    - name: Create Terraform variables file
+      run: |
+        cat <<EOF > ${{ vars.CI_ENVIR_PATH }}/terraform.tfvars
+        aws_region  = "${{ vars.TFVAR_AWS_REGION }}"
+        # ...
+        EOF
+
+    ########## S P E C I F I C   B L O C K ####################################
+  
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-region: "${{ vars.CI_AWS_REGION }}"
+        role-to-assume: "${{ vars.CI_TF_ASSUMEROLE }}"
+    - name: Terraform INIT
+      id: init
+      run: |
+        terraform -chdir=${{ vars.CI_ENVIR_PATH }} init
+    - name: Terraform FMT
+      id: fmt
+      run: |
+        terraform -chdir=${{ vars.CI_ENVIR_PATH }} fmt -check
+      continue-on-error: true
+    - name: Terraform VALIDATE
+      id: validate
+      run: |
+        terraform -chdir=${{ vars.CI_ENVIR_PATH }} validate -no-color
+    - name: TFLint
+      uses: terraform-linters/setup-tflint@v3
+      with:
+        tflint_version: ${{ vars.CI_TFLINT_VERSION }}
+    - id: tflint
+      run: |
+        tflint --init
+        tflint --chdir=${{ vars.CI_ENVIR_PATH }} -f compact --no-color 
+
+
+
+###############################################################################
+##
+## Terraform Plan stage
+##
+###############################################################################
+
+  PlanStage:
+    name: Terraform Plan
+    needs: [ LintStage ]
+    runs-on: ["self-hosted", "m92p"]
+    environment: ci_cd_pipeline
+    steps:
+
+    ########## G E N E R I C   B L O C K ######################################
+
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@633666f66e0061ca3b725c73b2ec20cd13a8fdd1 # v2.0.3
+      with:
+        terraform_version: "${{ vars.CI_TF_VERSION }}"
+    - name: Create Terraform variables file
+      run: |
+        cat <<EOF > ${{ vars.CI_ENVIR_PATH }}/terraform.tfvars
+        aws_region  = "${{ vars.TFVAR_AWS_REGION }}"
+        # ...
+        EOF
+  
+    ########## S P E C I F I C   B L O C K ####################################
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-region: "${{ vars.CI_AWS_REGION }}"
+        role-to-assume: "${{ vars.CI_TF_ASSUMEROLE }}"
+    - name: Terraform INIT
+      id: init
+      run: |
+        terraform -chdir=${{ vars.CI_ENVIR_PATH }} init
+    - name: Terraform PLAN
+      id: plan
+      run: |
+        terraform -chdir=${{ vars.CI_ENVIR_PATH }} plan -var-file terraform.tfvars -out tfplan -no-color
+        terraform -chdir=${{ vars.CI_ENVIR_PATH }} show -json tfplan > ${{ vars.CI_ENVIR_PATH }}/tfplan.json
+    - uses: actions/upload-artifact@v4
+      with:
+        name: terraform-plan
+        path: ${{ vars.CI_ENVIR_PATH }}/tfplan.json
+        overwrite: true
+
+
+
+###############################################################################
+##
+## Security check stage
+##
+###############################################################################
+
+  SecurityStage:
+    name: Security checks with KICS
+    needs: [ PlanStage ]
+    runs-on: ["self-hosted", "m92p"]
+    environment: ci_cd_pipeline
+    steps:
+
+    ########## G E N E R I C   B L O C K ######################################
+
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@633666f66e0061ca3b725c73b2ec20cd13a8fdd1 # v2.0.3
+      with:
+        terraform_version: "${{ vars.CI_TF_VERSION }}"
+    - name: Create Terraform variables file
+      run: |
+        cat <<EOF > ${{ vars.CI_ENVIR_PATH }}/terraform.tfvars
+        aws_region  = "${{ vars.TFVAR_AWS_REGION }}"
+        # ...
+        EOF
+  
+    ########## S P E C I F I C   B L O C K ####################################
+
+    - name: Setting KICS report directory
+      run: |
+        mkdir -p results-dir
+    - name: Run KICS w/SARIF report
+      uses: checkmarx/kics-github-action@v1.7.0
+      with:
+        path: '${{ vars.CI_ENVIR_PATH }}'
+        fail_on: high
+        # ignore_on_exit: results
+        output_path: results-dir
+        platform_type: terraform
+        output_formats: 'json,sarif'
+    - uses: actions/upload-artifact@v4
+      with:
+        path: results-dir
+        name: results.sarif
+
+
+
+###############################################################################
+##
+## FinOps stage
+##
+###############################################################################
+
+  FinOpsStage:
+    name: FinOps evaluation
+    needs: [ PlanStage ]
+    runs-on: ["self-hosted", "m92p"]
+    environment: ci_cd_pipeline
+    steps:
+
+    ########## G E N E R I C   B L O C K ######################################
+
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@633666f66e0061ca3b725c73b2ec20cd13a8fdd1 # v2.0.3
+      with:
+        terraform_version: "${{ vars.CI_TF_VERSION }}"
+    - name: Create Terraform variables file
+      run: |
+        cat <<EOF > ${{ vars.CI_ENVIR_PATH }}/terraform.tfvars
+        aws_region  = "${{ vars.TFVAR_AWS_REGION }}"
+        # ...
+        EOF
+  
+    ########## S P E C I F I C   B L O C K ####################################
+
+    - name: Setup Infracost
+      uses: infracost/actions/setup@v2
+      with:
+        api-key: ${{ secrets.CI_INFRACOST_APIKEY }}
+        currency: EUR
+    - name: Infracost estimation & SHA commit annotation
+      id: infracost
+      run: |
+        infracost breakdown --path=${{ vars.CI_ENVIR_PATH }} --format=json \
+          --out-file=${{ vars.CI_ENVIR_PATH }}/infracost-base.json
+        infracost comment github \
+          --path=${{ vars.CI_ENVIR_PATH }}/infracost-base.json \
+          --repo=$GITHUB_REPOSITORY \
+          --commit=$GITHUB_SHA \
+          --github-token=${{ secrets.CI_GITHUB_TOKEN }} \
+          --behavior=update
+
+
+
+###############################################################################
+##
+## Terraform Apply stage
+##
+###############################################################################
+
+  ApplyStage:
+    name: Terraform Apply
+    needs: [ SecurityStage, FinOpsStage ]
+    runs-on: ["self-hosted", "m92p"]
+    environment: ci_cd_pipeline
+    steps:
+
+    ########## G E N E R I C   B L O C K ######################################
+
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@633666f66e0061ca3b725c73b2ec20cd13a8fdd1 # v2.0.3
+      with:
+        terraform_version: "${{ vars.CI_TF_VERSION }}"
+    - name: Create Terraform variables file
+      run: |
+        cat <<EOF > ${{ vars.CI_ENVIR_PATH }}/terraform.tfvars
+        aws_region  = "${{ vars.TFVAR_AWS_REGION }}"
+        # ...
+        EOF
+  
+    ########## S P E C I F I C   B L O C K ####################################
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-region: "${{ vars.CI_AWS_REGION }}"
+        role-to-assume: "${{ vars.CI_TF_ASSUMEROLE }}"
+    - name: Terraform INIT
+      id: init
+      run: |
+        terraform -chdir=${{ vars.CI_ENVIR_PATH }} init
+    - name: Terraform PLAN
+      id: plan
+      run: |
+        terraform -chdir=${{ vars.CI_ENVIR_PATH }} plan -var-file terraform.tfvars -out tfplan -no-color
+    - name: Terraform APPLY
+      id: apply
+      run: |
+        terraform -chdir=${{ vars.CI_ENVIR_PATH }} apply -auto-approve "tfplan" 
