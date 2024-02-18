@@ -1,0 +1,73 @@
+##
+## GITHUB ACTIONS PIPELINE 
+## Actions to be taken when pushing or PR to a branch
+##
+## Last update: 2024/02/06
+##
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - sandbox
+  pull_request:
+    branches:
+      - sandbox
+
+name: Push or PR to SANDBOX
+
+permissions:
+  pull-requests: write
+  id-token: write
+  contents: write
+  actions: write
+  checks: write
+
+jobs:
+
+###############################################################################
+##
+## Simple pipeline
+##
+###############################################################################
+
+  SingleStage:
+    name: Simple Pipeline
+    runs-on: ["self-hosted", "m92p"]
+    environment: ci_cd_pipeline
+    steps:
+  
+    ########## G E N E R I C   B L O C K ######################################
+  
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@633666f66e0061ca3b725c73b2ec20cd13a8fdd1 # v2.0.3
+      with:
+        terraform_version: "${{ vars.CI_TF_VERSION }}"
+    - name: Create Terraform variables file
+      run: |
+        cat <<EOF > ${{ vars.CI_ENVIR_PATH }}/terraform.tfvars
+        aws_region  = "${{ vars.TFVAR_AWS_REGION }}"
+        EOF
+
+    ########## S P E C I F I C   B L O C K ####################################
+  
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-region: "${{ vars.CI_AWS_REGION }}"
+        role-to-assume: "${{ vars.CI_TF_ASSUMEROLE }}"
+    - name: Terraform INIT
+      run: |
+        terraform -chdir=${{ vars.CI_ENVIR_PATH }} init
+      continue-on-error: true
+    - name: Terraform VALIDATE
+      run: |
+        terraform -chdir=${{ vars.CI_ENVIR_PATH }} validate -no-color
+    - name: Terraform PLAN
+      run: |
+        terraform -chdir=${{ vars.CI_ENVIR_PATH }} plan -var-file terraform.tfvars -out tfplan -no-color
+    - name: Terraform APPLY
+      run: |
+        terraform -chdir=${{ vars.CI_ENVIR_PATH }} apply -auto-approve "tfplan" 
